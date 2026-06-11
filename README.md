@@ -193,6 +193,50 @@ make hpa    # confirm autoscaler is active
 | `make teardown` | Delete everything including PVCs |
 | `make teardown-pvc` | Delete only the postgres volume |
 
+## Debugging CSRF Issues
+
+CSRF errors are the most common issue when setting up a reverse proxy in front of Bugsink. Bugsink ships with a verbose CSRF middleware that shows detailed error messages including the exact headers Django received — use that output to diagnose misconfigured proxy headers.
+
+For nginx, ensure these three headers are forwarded:
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Proto https;
+proxy_set_header X-Real-IP $remote_addr;
+```
+
+And set `BEHIND_HTTPS_PROXY: "True"` in your overlay's `configmap-patch.yaml` so Django trusts those headers.
+
+> Note: You never need to set `CSRF_TRUSTED_ORIGINS` with Bugsink — it is not required and should be left unset.
+
+### Advanced CSRF debugging tool
+
+If the verbose error message isn't enough, Bugsink has a built-in CSRF debugging tool. It is disabled by default for security reasons.
+
+To enable it, add `DEBUG_CSRF` to your overlay's `configmap-patch.yaml`:
+
+```yaml
+data:
+  BEHIND_HTTPS_PROXY: "True"
+  BASE_URL: "https://bugsink.yourdomain.com"
+  DEBUG_CSRF: "True"
+```
+
+Redeploy, then visit `https://bugsink.yourdomain.com/debug/csrf/` and press the button to get a full report of what headers and checks Django is seeing.
+
+Disable it again once you're done — remove `DEBUG_CSRF` from the configmap and redeploy.
+
+**For local testing with ngrok**, enable it in the local overlay:
+
+```yaml
+data:
+  BEHIND_HTTPS_PROXY: "True"
+  BASE_URL: "https://<your-ngrok-url>"
+  DEBUG_CSRF: "True"
+```
+
+---
+
 ## Integrating with Your App
 
 Bugsink is compatible with the Sentry SDK. Get your DSN from the Bugsink UI after creating a project.
