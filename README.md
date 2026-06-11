@@ -1,9 +1,10 @@
 # Bugsink Hosted
 
-Self-hosted error tracking using [Bugsink](https://www.bugsink.com), deployed on Kubernetes with PostgreSQL persistence, horizontal autoscaling, and nginx TLS termination.
+Self-hosted error tracking using [Bugsink](https://www.bugsink.com), deployed on Kubernetes with PostgreSQL persistence, horizontal autoscaling, and two production deployment options: nginx (NodePort) or Traefik (Ingress + automatic TLS).
 
 ## Architecture
 
+**Option A — nginx (NodePort)**
 ```mermaid
 flowchart TD
     A[Django App / Any App] -->|DSN over HTTPS| B[nginx\nTLS termination\nbugsink.yourdomain.com]
@@ -12,7 +13,19 @@ flowchart TD
     D --> E[(PostgreSQL\nStatefulSet)]
     E --> F[(PersistentVolumeClaim\n10Gi)]
     G[HPA] -->|watches CPU| D
-    H[Kustomize\noverlays/local\noverlays/production] -->|kubectl apply -k| C
+```
+
+**Option B — Traefik (Ingress)**
+```mermaid
+flowchart TD
+    A[Django App / Any App] -->|DSN over HTTPS| B[Traefik\nIngress Controller\nport 443]
+    B -->|cluster DNS| C[K8s ClusterIP Service]
+    C --> D[Bugsink Deployment\n1-5 replicas]
+    D --> E[(PostgreSQL\nStatefulSet)]
+    E --> F[(PersistentVolumeClaim\n10Gi)]
+    G[HPA] -->|watches CPU| D
+    B -->|ACME| H[Let's Encrypt\nauto cert issuance]
+    H -->|stores cert| I[K8s Secret\nbugsink-tls]
 ```
 
 ## What This Does
@@ -21,8 +34,8 @@ flowchart TD
 - PostgreSQL data is persisted via a `PersistentVolumeClaim` — survives pod restarts and rescheduling
 - Bugsink scales horizontally (1–5 replicas) via a `HorizontalPodAutoscaler` based on CPU usage
 - Postgres stays at a single replica — it is not horizontally scaled
-- nginx on the host terminates TLS using Certbot-managed Let's Encrypt certificates and proxies to the K8s NodePort
-- Kustomize overlays separate local and production configuration cleanly
+- Two production options: nginx on the host (NodePort) or Traefik in-cluster (Ingress + automatic Let's Encrypt)
+- Kustomize overlays separate local and production configuration cleanly — `production` for nginx, `production-traefik` for Traefik
 
 ## File Structure
 
@@ -45,9 +58,17 @@ k8s/
     │   └── secrets/               # git-ignored, local credentials
     │       ├── postgres.env
     │       └── bugsink.env
-    └── production/                # remote server behind nginx
+    ├── production/                # nginx + NodePort (existing server with nginx)
+    │   ├── kustomization.yaml
+    │   ├── configmap-patch.yaml
+    │   └── secrets/               # git-ignored, production credentials
+    │       ├── postgres.env
+    │       └── bugsink.env
+    └── production-traefik/        # Traefik + ClusterIP + Ingress (Traefik as ingress controller)
         ├── kustomization.yaml
         ├── configmap-patch.yaml
+        ├── service-patch.yaml     # patches NodePort → ClusterIP
+        ├── ingress.yaml           # Traefik Ingress with ACME cert resolver
         └── secrets/               # git-ignored, production credentials
             ├── postgres.env
             └── bugsink.env
@@ -130,21 +151,21 @@ Use the ngrok `https://` URL as your DSN host. Also update `BASE_URL` in the loc
 
 > Note: ngrok free tier URLs change on every restart.
 
-## Production Deployment Checklist
+## Production Deployment
 
-### Before deploying
+### Option A — nginx (NodePort)
 
+Use this when nginx is already running on the server and handling other sites.
+
+**Checklist:**
 - [ ] Domain DNS A record points to your server IP
 - [ ] Certbot has issued certificates: `/etc/letsencrypt/live/bugsink.yourdomain.com/`
-- [ ] nginx server block added (see below)
 - [ ] `k8s/overlays/production/configmap-patch.yaml` has correct `BASE_URL`
-- [ ] `k8s/overlays/production/secrets/postgres.env` has a strong `POSTGRES_PASSWORD`
-- [ ] `k8s/overlays/production/secrets/bugsink.env` has a 50+ char random `SECRET_KEY`
-- [ ] `k8s/overlays/production/secrets/bugsink.env` has your real admin email in `CREATE_SUPERUSER`
+- [ ] `k8s/overlays/production/secrets/` populated with strong credentials
 - [ ] `overlays/*/secrets/` is in `.gitignore`
 - [ ] metrics-server is installed on the cluster
 
-### nginx server block
+**nginx server block:**
 
 ```nginx
 server {
@@ -163,13 +184,52 @@ server {
 }
 ```
 
-### Deploy
-
+**Deploy:**
 ```bash
 make deploy-prod
 make watch
-make pvc    # confirm postgres volume is Bound
-make hpa    # confirm autoscaler is active
+make pvc
+make hpa
+```
+
+---
+
+### Option B — Traefik (Ingress)
+
+Use this when Traefik is running as the cluster ingress controller. Traefik handles TLS automatically via Let's Encrypt — no Certbot needed.
+
+**Checklist:**
+- [ ] Domain DNS A record points to your server IP
+- [ ] Traefik is deployed with a `certificatesResolvers.letsencrypt` block in its static config
+- [ ] Port 80 is open on the server (Let's Encrypt HTTP challenge)
+- [ ] `k8s/overlays/production-traefik/ingress.yaml` has correct domain
+- [ ] `k8s/overlays/production-traefik/configmap-patch.yaml` has correct `BASE_URL`
+- [ ] `k8s/overlays/production-traefik/secrets/` populated with strong credentials
+- [ ] `overlays/*/secrets/` is in `.gitignore`
+- [ ] metrics-server is installed on the cluster
+
+**How Traefik issues the cert automatically:**
+
+```
+kubectl apply -k k8s/overlays/production-traefik/
+  → Traefik sees the Ingress resource
+  → contacts Let's Encrypt ACME API
+  → Let's Encrypt validates via HTTP challenge on port 80
+  → cert issued and stored as K8s Secret "bugsink-tls"
+  → HTTPS starts working
+```
+
+Verify the cert was issued:
+```bash
+kubectl get secret bugsink-tls -n bugsink
+```
+
+**Deploy:**
+```bash
+kubectl apply -k k8s/overlays/production-traefik/
+make watch
+make pvc
+make hpa
 ```
 
 ## Makefile Reference
@@ -177,9 +237,11 @@ make hpa    # confirm autoscaler is active
 | Command | Description |
 |---|---|
 | `make deploy-local` | Deploy to local cluster + restart bugsink |
-| `make deploy-prod` | Deploy to production cluster |
+| `make deploy-prod` | Deploy to production (nginx + NodePort) |
+| `make deploy-prod-traefik` | Deploy to production (Traefik + Ingress) |
 | `make diff-local` | Preview local changes before applying |
-| `make diff-prod` | Preview production changes before applying |
+| `make diff-prod` | Preview production nginx changes before applying |
+| `make diff-prod-traefik` | Preview production Traefik changes before applying |
 | `make status` | Show all resources in namespace |
 | `make watch` | Watch pods update in real time |
 | `make logs` | Snapshot bugsink logs |
