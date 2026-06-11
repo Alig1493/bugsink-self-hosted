@@ -17,7 +17,7 @@ flowchart TD
 
 ## What This Does
 
-- Runs Bugsink inside Kubernetes with a dedicated PostgreSQL instance
+- Runs Bugsink (`bugsink/bugsink:2`) inside Kubernetes with a dedicated PostgreSQL instance
 - PostgreSQL data is persisted via a `PersistentVolumeClaim` — survives pod restarts and rescheduling
 - Bugsink scales horizontally (1–5 replicas) via a `HorizontalPodAutoscaler` based on CPU usage
 - Postgres stays at a single replica — it is not horizontally scaled

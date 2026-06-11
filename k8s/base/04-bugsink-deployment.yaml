@@ -21,7 +21,7 @@ spec:
         - until pg_isready -h postgres -p 5432; do echo "waiting for postgres"; sleep 2; done
       containers:
       - name: bugsink
-        image: bugsink/bugsink:latest
+        image: bugsink/bugsink:2
         ports:
         - containerPort: 8000
         envFrom:
