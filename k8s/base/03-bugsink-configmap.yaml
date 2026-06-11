@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bugsink-config
+  namespace: bugsink
+data:
+  PORT: "8000"
+  BEHIND_HTTPS_PROXY: "True"
+  BASE_URL: "http://localhost:30080"
