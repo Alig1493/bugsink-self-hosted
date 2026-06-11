@@ -4,6 +4,8 @@ metadata:
   name: bugsink
   namespace: bugsink
 spec:
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: bugsink
