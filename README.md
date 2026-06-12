@@ -1,6 +1,6 @@
 # Bugsink Hosted
 
-Self-hosted error tracking using [Bugsink](https://www.bugsink.com), deployed on Kubernetes with PostgreSQL persistence, horizontal autoscaling, and two production deployment options: nginx (NodePort) or Traefik (Ingress + automatic TLS).
+Self-hosted error tracking using [Bugsink](https://www.bugsink.com), deployed on Kubernetes with PostgreSQL persistence, horizontal autoscaling, and three production deployment options.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ flowchart TD
     G[HPA] -->|watches CPU| D
 ```
 
-**Option B — Traefik (Ingress)**
+**Option B — Traefik (Ingress + StatefulSet Postgres)**
 ```mermaid
 flowchart TD
     A[Django App / Any App] -->|DSN over HTTPS| B[Traefik\nIngress Controller\nport 443]
@@ -28,14 +28,30 @@ flowchart TD
     H -->|stores cert| I[K8s Secret\nbugsink-tls]
 ```
 
+**Option C — Traefik (Ingress + CloudNativePG HA Postgres)**
+```mermaid
+flowchart TD
+    A[Django App / Any App] -->|DSN over HTTPS| B[Traefik\nIngress Controller\nport 443]
+    B -->|cluster DNS| C[K8s ClusterIP Service]
+    C --> D[Bugsink Deployment\n1-5 replicas]
+    D -->|postgres-rw| E[(CNPG Primary)]
+    E -->|streaming replication| F[(CNPG Replica 1)]
+    E -->|streaming replication| G[(CNPG Replica 2)]
+    E --- H[(PVC 10Gi)]
+    F --- I[(PVC 10Gi)]
+    G --- J[(PVC 10Gi)]
+    K[HPA] -->|watches CPU| D
+    B -->|ACME| L[Let's Encrypt\nauto cert issuance]
+    L -->|stores cert| M[K8s Secret\nbugsink-tls]
+```
+
 ## What This Does
 
 - Runs Bugsink (`bugsink/bugsink:2`) inside Kubernetes with a dedicated PostgreSQL instance
 - PostgreSQL data is persisted via a `PersistentVolumeClaim` — survives pod restarts and rescheduling
 - Bugsink scales horizontally (1–5 replicas) via a `HorizontalPodAutoscaler` based on CPU usage
-- Postgres stays at a single replica — it is not horizontally scaled
-- Two production options: nginx on the host (NodePort) or Traefik in-cluster (Ingress + automatic Let's Encrypt)
-- Kustomize overlays separate local and production configuration cleanly — `production` for nginx, `production-traefik` for Traefik
+- Three production options: nginx on the host (NodePort), Traefik in-cluster (Ingress + Let's Encrypt), or Traefik + CloudNativePG for HA Postgres with streaming replication and automatic failover
+- Kustomize components separate postgres implementations so each overlay picks its own backend — StatefulSet for Options A/B, CNPG for Option C
 
 ## File Structure
 
@@ -45,12 +61,18 @@ k8s/
 ├── base/                          # shared across all environments
 │   ├── kustomization.yaml
 │   ├── 00-namespace.yaml
-│   ├── 01-postgres-statefulset.yaml
-│   ├── 02-postgres-service.yaml
-│   ├── 03-bugsink-configmap.yaml
-│   ├── 04-bugsink-deployment.yaml
-│   ├── 05-bugsink-service.yaml
-│   └── 06-bugsink-hpa.yaml
+│   ├── 01-bugsink-configmap.yaml
+│   ├── 02-bugsink-deployment.yaml
+│   ├── 03-bugsink-service.yaml
+│   └── 04-bugsink-hpa.yaml
+├── components/                    # pluggable postgres backends
+│   ├── postgres-statefulset/      # single-replica postgres (Options A + B)
+│   │   ├── kustomization.yaml
+│   │   ├── postgres-statefulset.yaml
+│   │   └── postgres-service.yaml
+│   └── postgres-cnpg/             # CloudNativePG HA cluster (Option C)
+│       ├── kustomization.yaml
+│       └── postgres-cluster.yaml
 └── overlays/
     ├── local/                     # minikube / local testing
     │   ├── kustomization.yaml
@@ -58,17 +80,26 @@ k8s/
     │   └── secrets/               # git-ignored, local credentials
     │       ├── postgres.env
     │       └── bugsink.env
-    ├── production/                # nginx + NodePort (existing server with nginx)
+    ├── production/                # nginx + NodePort (Option A)
     │   ├── kustomization.yaml
     │   ├── configmap-patch.yaml
     │   └── secrets/               # git-ignored, production credentials
     │       ├── postgres.env
     │       └── bugsink.env
-    └── production-traefik/        # Traefik + ClusterIP + Ingress (Traefik as ingress controller)
+    ├── production-traefik/        # Traefik + StatefulSet Postgres (Option B)
+    │   ├── kustomization.yaml
+    │   ├── configmap-patch.yaml
+    │   ├── service-patch.yaml     # patches NodePort → ClusterIP
+    │   ├── ingress.yaml           # Traefik Ingress with ACME cert resolver
+    │   └── secrets/               # git-ignored, production credentials
+    │       ├── postgres.env
+    │       └── bugsink.env
+    └── production-cnpg/           # Traefik + CloudNativePG HA (Option C)
         ├── kustomization.yaml
         ├── configmap-patch.yaml
         ├── service-patch.yaml     # patches NodePort → ClusterIP
         ├── ingress.yaml           # Traefik Ingress with ACME cert resolver
+        ├── deployment-patch.yaml  # redirects DATABASE_URL to postgres-rw
         └── secrets/               # git-ignored, production credentials
             ├── postgres.env
             └── bugsink.env
@@ -165,6 +196,19 @@ Use this when nginx is already running on the server and handling other sites.
 - [ ] `overlays/*/secrets/` is in `.gitignore`
 - [ ] metrics-server is installed on the cluster
 
+**`secrets/postgres.env`:**
+```
+POSTGRES_USER=bugsink
+POSTGRES_PASSWORD=<strong-password>
+POSTGRES_DB=bugsink
+```
+
+**`secrets/bugsink.env`:**
+```
+SECRET_KEY=<50-char-random-string>
+CREATE_SUPERUSER=admin@yourdomain.com:<password>
+```
+
 **nginx server block:**
 
 ```nginx
@@ -194,9 +238,9 @@ make hpa
 
 ---
 
-### Option B — Traefik (Ingress)
+### Option B — Traefik (Ingress + StatefulSet Postgres)
 
-Use this when Traefik is running as the cluster ingress controller. Traefik handles TLS automatically via Let's Encrypt — no Certbot needed.
+Use this when Traefik is running as the cluster ingress controller. Traefik handles TLS automatically via Let's Encrypt — no Certbot needed. Postgres runs as a single-replica StatefulSet.
 
 **Checklist:**
 - [ ] Domain DNS A record points to your server IP
@@ -207,6 +251,19 @@ Use this when Traefik is running as the cluster ingress controller. Traefik hand
 - [ ] `k8s/overlays/production-traefik/secrets/` populated with strong credentials
 - [ ] `overlays/*/secrets/` is in `.gitignore`
 - [ ] metrics-server is installed on the cluster
+
+**`secrets/postgres.env`:**
+```
+POSTGRES_USER=bugsink
+POSTGRES_PASSWORD=<strong-password>
+POSTGRES_DB=bugsink
+```
+
+**`secrets/bugsink.env`:**
+```
+SECRET_KEY=<50-char-random-string>
+CREATE_SUPERUSER=admin@yourdomain.com:<password>
+```
 
 **How Traefik issues the cert automatically:**
 
@@ -226,9 +283,75 @@ kubectl get secret bugsink-tls -n bugsink
 
 **Deploy:**
 ```bash
-kubectl apply -k k8s/overlays/production-traefik/
+make deploy-prod-traefik
 make watch
 make pvc
+make hpa
+```
+
+---
+
+### Option C — Traefik + CloudNativePG (HA Postgres)
+
+Use this when you want high-availability Postgres with streaming replication and automatic failover. CNPG runs 3 Postgres instances (1 primary + 2 replicas) and manages failover automatically. Requires the CNPG operator installed once per cluster.
+
+**How CNPG names its services**
+
+When the CNPG operator processes a `Cluster` resource named `postgres`, it automatically creates three Kubernetes Services:
+
+| Service | Routes to | Purpose |
+|---|---|---|
+| `postgres-rw` | primary only | all writes — what Bugsink uses |
+| `postgres-ro` | replicas only | read-heavy queries |
+| `postgres-r` | any instance | random reads |
+
+These are always named `<cluster-name>-rw`, `<cluster-name>-ro`, `<cluster-name>-r`. Since the cluster is named `postgres`, Bugsink connects to `postgres-rw`. You can verify after deploying:
+```bash
+kubectl get svc -n bugsink | grep postgres
+```
+
+**Install CNPG operator (once per cluster):**
+```bash
+kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
+```
+
+**Checklist:**
+- [ ] CNPG operator installed on the cluster (see above)
+- [ ] Domain DNS A record points to your server IP
+- [ ] Traefik is deployed with a `certificatesResolvers.letsencrypt` block in its static config
+- [ ] Port 80 is open on the server (Let's Encrypt HTTP challenge)
+- [ ] `k8s/overlays/production-cnpg/ingress.yaml` has correct domain
+- [ ] `k8s/overlays/production-cnpg/configmap-patch.yaml` has correct `BASE_URL`
+- [ ] `k8s/overlays/production-cnpg/secrets/` populated with strong credentials
+- [ ] `overlays/*/secrets/` is in `.gitignore`
+- [ ] metrics-server is installed on the cluster
+
+**`secrets/postgres.env`** — requires two sets of keys:
+```
+# For CNPG bootstrap: sets the password for the 'bugsink' database owner
+username=bugsink
+password=<strong-password>
+
+# For Bugsink deployment: used to compose DATABASE_URL
+POSTGRES_USER=bugsink
+POSTGRES_PASSWORD=<strong-password>
+POSTGRES_DB=bugsink
+```
+
+> `username`/`password` are the key names CNPG expects when reading the bootstrap secret. `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` are the keys the Bugsink deployment reads to build its `DATABASE_URL`. Both sets must match.
+
+**`secrets/bugsink.env`:**
+```
+SECRET_KEY=<50-char-random-string>
+CREATE_SUPERUSER=admin@yourdomain.com:<password>
+```
+
+**Deploy:**
+```bash
+make deploy-prod-cnpg
+make watch
+kubectl get cluster -n bugsink     # CNPG Cluster status: Healthy
+make pvc                           # 3 PVCs, one per CNPG instance
 make hpa
 ```
 
@@ -238,10 +361,12 @@ make hpa
 |---|---|
 | `make deploy-local` | Deploy to local cluster + restart bugsink |
 | `make deploy-prod` | Deploy to production (nginx + NodePort) |
-| `make deploy-prod-traefik` | Deploy to production (Traefik + Ingress) |
+| `make deploy-prod-traefik` | Deploy to production (Traefik + StatefulSet Postgres) |
+| `make deploy-prod-cnpg` | Deploy to production (Traefik + CloudNativePG HA) |
 | `make diff-local` | Preview local changes before applying |
 | `make diff-prod` | Preview production nginx changes before applying |
 | `make diff-prod-traefik` | Preview production Traefik changes before applying |
+| `make diff-prod-cnpg` | Preview production CNPG changes before applying |
 | `make status` | Show all resources in namespace |
 | `make watch` | Watch pods update in real time |
 | `make logs` | Snapshot bugsink logs |

@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bugsink
+  namespace: bugsink
+  annotations:
+    traefik.ingress.kubernetes.io/router.tls.certresolver: letsencrypt  # tells Traefik to use the ACME resolver you configured in its static config
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure  # routes HTTPS traffic (port 443)
+spec:
+  ingressClassName: traefik  # explicitly assigns this to the Traefik controller
+  rules:
+  - host: bugsink.yourdomain.com  # Replace with your actual domain when read
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: bugsink
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - bugsink.yourdomain.com
+    secretName: bugsink-tls  # where Traefik stores the issued cert as a K8s Secret

@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bugsink
+  namespace: bugsink
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        command:
+        - sh
+        - -c
+        - until pg_isready -h postgres-rw -p 5432; do echo "waiting for postgres"; sleep 2; done
+      containers:
+      - name: bugsink
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres-rw:5432/$(POSTGRES_DB)"
