@@ -1,0 +1,90 @@
+name: Release manifests
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - uses: azure/setup-kubectl@v4
+
+    - name: Detect changed overlays
+      uses: dorny/paths-filter@v3
+      id: changes
+      with:
+        filters: |
+          local:
+            - 'k8s/base/**'
+            - 'k8s/components/postgres-statefulset/**'
+            - 'k8s/overlays/local/**'
+            - 'scripts/render.sh'
+          nginx:
+            - 'k8s/base/**'
+            - 'k8s/components/postgres-statefulset/**'
+            - 'k8s/overlays/production/**'
+            - 'scripts/render.sh'
+          traefik:
+            - 'k8s/base/**'
+            - 'k8s/components/postgres-statefulset/**'
+            - 'k8s/overlays/production-traefik/**'
+            - 'scripts/render.sh'
+          cnpg:
+            - 'k8s/base/**'
+            - 'k8s/components/postgres-cnpg/**'
+            - 'k8s/overlays/production-cnpg/**'
+            - 'scripts/render.sh'
+
+    - name: Override — rebuild all on tag push
+      if: startsWith(github.ref, 'refs/tags/')
+      run: echo "BUILD_ALL=true" >> $GITHUB_ENV
+
+    - name: Render local manifest
+      if: env.BUILD_ALL == 'true' || steps.changes.outputs.local == 'true'
+      run: bash scripts/render.sh local
+
+    - name: Render nginx manifest
+      if: env.BUILD_ALL == 'true' || steps.changes.outputs.nginx == 'true'
+      run: bash scripts/render.sh nginx
+
+    - name: Render traefik manifest
+      if: env.BUILD_ALL == 'true' || steps.changes.outputs.traefik == 'true'
+      run: bash scripts/render.sh traefik
+
+    - name: Render cnpg manifest
+      if: env.BUILD_ALL == 'true' || steps.changes.outputs.cnpg == 'true'
+      run: bash scripts/render.sh cnpg
+
+    - name: Check if any artifacts were rendered
+      id: artifacts
+      run: |
+        if compgen -G "dist/*.yaml" > /dev/null 2>&1; then
+          echo "has_files=true" >> $GITHUB_OUTPUT
+        else
+          echo "has_files=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Update latest pre-release
+      if: github.ref == 'refs/heads/main' && steps.artifacts.outputs.has_files == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: latest
+        prerelease: true
+        name: Latest (main)
+        files: dist/*.yaml
+
+    - name: Create versioned release
+      if: startsWith(github.ref, 'refs/tags/') && steps.artifacts.outputs.has_files == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*.yaml
+        generate_release_notes: true

@@ -1,10 +1,11 @@
 NAMESPACE := bugsink
 
-.PHONY: deploy-local deploy-prod deploy-prod-traefik \
-diff-local diff-prod diff-prod-traefik \
+.PHONY: deploy-local deploy-prod deploy-prod-traefik deploy-prod-cnpg \
+diff-local diff-prod diff-prod-traefik diff-prod-cnpg \
+render \
 status watch logs logs-follow logs-all logs-pod logs-postgres \
-pvc hpa minikube-url teardown teardown-pvc deploy-prod-cnpg \
-diff-prod-cnpg
+restore-start restore-watch restore-cutover restore-cleanup \
+pvc hpa minikube-url teardown teardown-pvc
 
 deploy-local:
 	kubectl apply -k k8s/overlays/local/
@@ -31,6 +32,9 @@ diff-prod-traefik:
 diff-prod-cnpg:
 	kubectl diff -k k8s/overlays/production-cnpg/
 
+render:
+	@bash scripts/render.sh
+
 status:
 	kubectl get all -n $(NAMESPACE)
 
@@ -51,6 +55,18 @@ logs-pod:
 
 logs-postgres:
 	kubectl logs -n $(NAMESPACE) -l app=postgres -f
+
+restore-start:
+	kubectl apply -f k8s/overlays/production-cnpg/cluster-restore.yaml
+
+restore-watch:
+	kubectl get cluster -n $(NAMESPACE) -w
+
+restore-cutover:
+	kubectl delete cluster postgres -n $(NAMESPACE)
+
+restore-cleanup:
+	kubectl delete cluster postgres-restored -n $(NAMESPACE)
 
 pvc:
 	kubectl get pvc -n $(NAMESPACE)

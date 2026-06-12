@@ -45,6 +45,39 @@ flowchart TD
     L -->|stores cert| M[K8s Secret\nbugsink-tls]
 ```
 
+## Pre-rendered Manifests
+
+Each GitHub release includes three ready-to-apply YAML files — one per deployment option. Download the one you need, replace the placeholder values, and apply it directly without needing Kustomize or cloning the repo.
+
+| File | Option |
+|---|---|
+| `bugsink-local.yaml` | Local / Minikube (testing) |
+| `bugsink-nginx.yaml` | nginx + NodePort (Option A) |
+| `bugsink-traefik.yaml` | Traefik + StatefulSet Postgres (Option B) |
+| `bugsink-cnpg.yaml` | Traefik + CloudNativePG HA (Option C) |
+| `bugsink-cnpg-restore.yaml` | CNPG data recovery template (Option C only) |
+
+Every file has a comment block at the top listing exactly which values to replace before applying:
+
+```bash
+# Download
+curl -LO https://github.com/<you>/bugsink-hosted/releases/latest/download/bugsink-cnpg.yaml
+
+# Replace placeholders (example with sed)
+sed -i \
+  -e 's/CHANGEME_POSTGRES_PASSWORD/your-strong-password/g' \
+  -e 's/CHANGEME_SECRET_KEY_MIN_50_CHARS/your-50-char-key/g' \
+  -e 's/CHANGEME_ADMIN_PASSWORD/your-admin-password/g' \
+  bugsink-cnpg.yaml
+
+# Apply
+kubectl apply -f bugsink-cnpg.yaml
+```
+
+Artifacts are rebuilt automatically when their source files change — a change to `k8s/overlays/production-cnpg/` only rebuilds `bugsink-cnpg.yaml`. Tagged releases always rebuild all three.
+
+---
+
 ## What This Does
 
 - Runs Bugsink (`bugsink/bugsink:2`) inside Kubernetes with a dedicated PostgreSQL instance
@@ -101,6 +134,7 @@ k8s/
         ├── ingress.yaml           # Traefik Ingress with ACME cert resolver
         ├── deployment-patch.yaml  # redirects DATABASE_URL to postgres-rw
         ├── cluster-backup-patch.yaml  # adds backup: block to CNPG Cluster
+        ├── cluster-restore.yaml       # template for manual data recovery
         └── secrets/               # git-ignored, production credentials
             ├── postgres.env
             ├── bugsink.env
@@ -373,6 +407,68 @@ kubectl get backup -n bugsink                  # check backup ran
 kubectl describe cluster postgres -n bugsink   # check WAL archiving is active
 ```
 
+**Restore**
+
+Restore is a manual procedure — trigger it when you need to recover data (accidental deletion, corruption, disaster recovery). CNPG does not restore automatically.
+
+How it works: [`cluster-restore.yaml`](k8s/overlays/production-cnpg/cluster-restore.yaml) creates a second cluster named `postgres-restored` using `bootstrap.recovery`. CNPG replays base backups and WAL from the object store into brand-new PVCs — completely separate from the live `postgres` cluster. Both clusters run in parallel so you can verify data before cutting over. The live cluster keeps serving traffic the entire time.
+
+**Step 1 — Configure the restore template**
+
+Open `k8s/overlays/production-cnpg/cluster-restore.yaml` and set:
+- `CHANGEME_BUCKET_NAME` and `CHANGEME_ENDPOINT_URL` to match `cluster-backup-patch.yaml`
+- Uncomment `targetTime` and set it to the moment just before data loss — or delete the `recoveryTarget` block to restore to the latest backup
+
+**Step 2 — Start the restore**
+
+```bash
+make restore-start    # applies cluster-restore.yaml; CNPG begins replaying from object store
+make restore-watch    # wait for postgres-restored to show Healthy
+```
+
+**Step 3 — Verify the data**
+
+```bash
+kubectl exec -it postgres-restored-1 -n bugsink -- psql -U bugsink bugsink
+```
+
+**Step 4 — Cut Bugsink over to the restored cluster**
+
+CNPG names services `<cluster-name>-rw`, so `postgres-restored` gets the service `postgres-restored-rw`. Edit `deployment-patch.yaml`, change `postgres-rw` → `postgres-restored-rw` in `DATABASE_URL`, then redeploy:
+
+```bash
+make deploy-prod-cnpg
+```
+
+Bugsink is now serving from restored data. The broken `postgres` cluster is still running but no longer receiving traffic.
+
+**Step 5 — Promote the restored cluster back to the `postgres` name**
+
+This step restores the original `postgres-rw` service name so future `make deploy-prod-cnpg` runs need no changes.
+
+First, free the `postgres` name by deleting the broken cluster:
+```bash
+make restore-cutover    # deletes the broken postgres cluster
+```
+
+Then edit `cluster-restore.yaml`: change `name: postgres-restored` → `name: postgres`. Also revert `deployment-patch.yaml` back to `postgres-rw` in `DATABASE_URL`. Apply:
+
+```bash
+make restore-start      # creates a new postgres cluster from the same backups
+make restore-watch      # wait for postgres to reach Healthy
+make deploy-prod-cnpg   # reconnects Bugsink to postgres-rw
+```
+
+**Step 6 — Clean up**
+
+```bash
+make restore-cleanup    # deletes the postgres-restored cluster
+```
+
+CNPG only reads `bootstrap` when a cluster is first created, so subsequent `make deploy-prod-cnpg` runs reconcile the running cluster without touching the data.
+
+> **PITR tip**: `targetTime` accepts RFC 3339 format — `"2026-06-12T10:00:00Z"`. CNPG replays WAL up to but not past that timestamp. Delete `recoveryTarget` entirely to restore to the latest backup.
+
 **Deploy:**
 ```bash
 make deploy-prod-cnpg
@@ -394,6 +490,7 @@ make hpa
 | `make diff-prod` | Preview production nginx changes before applying |
 | `make diff-prod-traefik` | Preview production Traefik changes before applying |
 | `make diff-prod-cnpg` | Preview production CNPG changes before applying |
+| `make render` | Render all production overlays to `dist/` |
 | `make status` | Show all resources in namespace |
 | `make watch` | Watch pods update in real time |
 | `make logs` | Snapshot bugsink logs |
@@ -401,6 +498,10 @@ make hpa
 | `make logs-all` | Live tail including init container |
 | `make logs-pod POD=<name>` | Logs for a specific pod |
 | `make logs-postgres` | Live tail postgres logs |
+| `make restore-start` | Apply cluster-restore.yaml to begin CNPG data recovery |
+| `make restore-watch` | Watch cluster status during restore |
+| `make restore-cutover` | Delete broken postgres cluster to free the name |
+| `make restore-cleanup` | Delete postgres-restored cluster after cutover |
 | `make pvc` | Check postgres volume is Bound |
 | `make hpa` | Check autoscaler status |
 | `make minikube-url` | Print local service URL |
