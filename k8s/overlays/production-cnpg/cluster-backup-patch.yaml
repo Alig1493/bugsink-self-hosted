@@ -1,0 +1,20 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: bugsink
+spec:
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://your-bucket-name/bugsink-postgres/
+      endpointURL: https://your-object-store-endpoint   # omit this line for AWS S3
+      s3Credentials:
+        accessKeyId:
+          name: object-store-credentials
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: object-store-credentials
+          key: SECRET_ACCESS_KEY
+      wal:
+        compression: gzip
+    retentionPolicy: "60d"  # retain 2 month's of data

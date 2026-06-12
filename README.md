@@ -100,9 +100,11 @@ k8s/
         ├── service-patch.yaml     # patches NodePort → ClusterIP
         ├── ingress.yaml           # Traefik Ingress with ACME cert resolver
         ├── deployment-patch.yaml  # redirects DATABASE_URL to postgres-rw
+        ├── cluster-backup-patch.yaml  # adds backup: block to CNPG Cluster
         └── secrets/               # git-ignored, production credentials
             ├── postgres.env
-            └── bugsink.env
+            ├── bugsink.env
+            └── object-store.env   # S3-compatible backup storage credentials
 ```
 
 ## Local Testing with Minikube
@@ -322,6 +324,7 @@ kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg
 - [ ] Port 80 is open on the server (Let's Encrypt HTTP challenge)
 - [ ] `k8s/overlays/production-cnpg/ingress.yaml` has correct domain
 - [ ] `k8s/overlays/production-cnpg/configmap-patch.yaml` has correct `BASE_URL`
+- [ ] `k8s/overlays/production-cnpg/cluster-backup-patch.yaml` has correct `destinationPath` and `endpointURL`
 - [ ] `k8s/overlays/production-cnpg/secrets/` populated with strong credentials
 - [ ] `overlays/*/secrets/` is in `.gitignore`
 - [ ] metrics-server is installed on the cluster
@@ -344,6 +347,30 @@ POSTGRES_DB=bugsink
 ```
 SECRET_KEY=<50-char-random-string>
 CREATE_SUPERUSER=admin@yourdomain.com:<password>
+```
+
+**`secrets/object-store.env`** — S3-compatible credentials for backup storage:
+```
+ACCESS_KEY_ID=<your-access-key>
+SECRET_ACCESS_KEY=<your-secret-key>
+```
+
+**Backups**
+
+CNPG ships WAL (transaction log) segments to object storage continuously and takes a full base backup daily at 2am UTC. Together they enable point-in-time recovery to any moment within the retention window (60 days by default). A backup is also triggered immediately on first deploy (`immediate: true` in the `ScheduledBackup` resource).
+
+Edit `cluster-backup-patch.yaml` with your provider's values:
+
+| Provider | `endpointURL` | `destinationPath` |
+|---|---|---|
+| AWS S3 | omit the field | `s3://bucket-name/prefix/` |
+| DigitalOcean Spaces | `https://<region>.digitaloceanspaces.com` | `s3://bucket-name/prefix/` |
+| MinIO | `https://minio.yourdomain.com` | `s3://bucket-name/prefix/` |
+
+Verify after deploying:
+```bash
+kubectl get backup -n bugsink                  # check backup ran
+kubectl describe cluster postgres -n bugsink   # check WAL archiving is active
 ```
 
 **Deploy:**
