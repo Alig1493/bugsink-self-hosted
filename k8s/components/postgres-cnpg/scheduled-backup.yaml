@@ -1,0 +1,10 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-backup
+  namespace: bugsink
+spec:
+  schedule: "0 2 * * *"  # daily at 2am UTC
+  cluster:
+    name: postgres
+  immediate: true  # take a backup immediately on first apply

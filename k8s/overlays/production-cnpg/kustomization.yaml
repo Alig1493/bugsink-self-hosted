@@ -9,6 +9,7 @@ patches:
 - path: configmap-patch.yaml
 - path: service-patch.yaml
 - path: deployment-patch.yaml
+- path: cluster-backup-patch.yaml
 secretGenerator:
 - name: postgres-credentials
   envs:
@@ -18,5 +19,10 @@ secretGenerator:
 - name: bugsink-secrets
   envs:
   - secrets/bugsink.env
+  options:
+    disableNameSuffixHash: true
+- name: object-store-credentials
+  envs:
+  - secrets/object-store.env
   options:
     disableNameSuffixHash: true

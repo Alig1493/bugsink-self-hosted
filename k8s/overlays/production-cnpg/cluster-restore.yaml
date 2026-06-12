@@ -1,0 +1,35 @@
+# Restore template — apply this when you need to recover data from backup.
+# See README Option C → Restore for the full procedure.
+#
+# Steps:
+#  1. Set destinationPath and endpointURL to match cluster-backup-patch.yaml
+#  2. Set targetTime to just before data loss, or delete recoveryTarget to restore to latest
+#  3. kubectl apply -f cluster-restore.yaml
+#  4. Wait for postgres-restored to reach Healthy, verify data, then update deployment-patch.yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-restored
+  namespace: bugsink
+spec:
+  instances: 3
+  storage:
+    size: 10Gi
+  bootstrap:
+    recovery:
+      source: postgres-backup
+      recoveryTarget:
+        # targetTime: "2026-06-12T10:00:00Z"   # uncomment and set to restore to a specific point
+        #                                        # delete this block entirely to restore to latest
+  externalClusters:
+  - name: postgres-backup
+    barmanObjectStore:
+      destinationPath: s3://CHANGEME_BUCKET_NAME/bugsink-postgres/   # must match cluster-backup-patch.yaml
+      endpointURL: CHANGEME_ENDPOINT_URL                            # omit this line for AWS S3
+      s3Credentials:
+        accessKeyId:
+          name: object-store-credentials
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: object-store-credentials
+          key: SECRET_ACCESS_KEY
