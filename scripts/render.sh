@@ -126,6 +126,7 @@ render_overlay() {
     local f="$dir/secrets/$1"
     files+=("$f")
     saved+=("$(cat "$f" 2>/dev/null || printf '')")
+    mkdir -p "$dir/secrets"
     printf '%s\n' "$2" > "$f"
     shift 2
   done
