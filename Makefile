@@ -3,7 +3,8 @@ NAMESPACE := bugsink
 .PHONY: deploy-local deploy-prod deploy-prod-traefik \
 diff-local diff-prod diff-prod-traefik \
 status watch logs logs-follow logs-all logs-pod logs-postgres \
-pvc hpa minikube-url teardown teardown-pvc
+pvc hpa minikube-url teardown teardown-pvc deploy-prod-cnpg \
+diff-prod-cnpg
 
 deploy-local:
 	kubectl apply -k k8s/overlays/local/
@@ -15,6 +16,9 @@ deploy-prod:
 deploy-prod-traefik:
 	kubectl apply -k k8s/overlays/production-traefik/
 
+deploy-prod-cnpg:
+	kubectl apply -k k8s/overlays/production-cnpg/
+
 diff-local:
 	kubectl diff -k k8s/overlays/local/
 
@@ -23,6 +27,9 @@ diff-prod:
 
 diff-prod-traefik:
 	kubectl diff -k k8s/overlays/production-traefik/
+
+diff-prod-cnpg:
+	kubectl diff -k k8s/overlays/production-cnpg/
 
 status:
 	kubectl get all -n $(NAMESPACE)
