@@ -83,7 +83,7 @@ Artifacts are rebuilt automatically when their source files change — a change 
 - Runs Bugsink (`bugsink/bugsink:2`) inside Kubernetes with a dedicated PostgreSQL instance
 - PostgreSQL data is persisted via a `PersistentVolumeClaim` — survives pod restarts and rescheduling
 - Bugsink scales horizontally (1–5 replicas) via a `HorizontalPodAutoscaler` based on CPU usage
-- Three production options: nginx on the host (NodePort), Traefik in-cluster (Ingress + Let's Encrypt), or Traefik + CloudNativePG for HA Postgres with streaming replication and automatic failover
+- Three production options: nginx on the host (NodePort), Traefik in-cluster (Ingress + Let's Encrypt), or Traefik + CloudNativePG for managed Postgres with backups, PITR, and optional HA replication across multiple nodes
 - Kustomize components separate postgres implementations so each overlay picks its own backend — StatefulSet for Options A/B, CNPG for Option C
 
 ## File Structure
@@ -278,9 +278,37 @@ make hpa
 
 Use this when Traefik is running as the cluster ingress controller. Traefik handles TLS automatically via Let's Encrypt — no Certbot needed. Postgres runs as a single-replica StatefulSet.
 
+**HSTS (HTTP Strict Transport Security)**
+
+The `traefik-hsts` component is included in this overlay. It adds a `Strict-Transport-Security` header to every response, which tells browsers to always use HTTPS for your domain — even if someone types `http://`. Without it, a first-time visitor on HTTP is technically vulnerable to a downgrade attack before the redirect fires. With `stsPreload: true` and a 1-year max-age, the domain can be submitted to browser preload lists so HTTPS is enforced before the first request ever reaches your server. This is also what takes an SSL Labs score from A to A+.
+
+**If using k3s:** k3s ships Traefik built-in. Configure it by dropping a `HelmChartConfig` file on the server — k3s watches that directory and applies it automatically:
+
+```bash
+# On the k3s server node
+cat > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml <<'EOF'
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    additionalArguments:
+      - "--certificatesresolvers.letsencrypt.acme.email=your@email.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/data/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    persistence:
+      enabled: true
+      size: 128Mi
+EOF
+```
+
+> The resolver name `letsencrypt` must match exactly — the ingress annotations reference it by that name.
+
 **Checklist:**
 - [ ] Domain DNS A record points to your server IP
-- [ ] Traefik is deployed with a `certificatesResolvers.letsencrypt` block in its static config
+- [ ] Traefik is deployed with a `certificatesResolvers.letsencrypt` block in its static config (or HelmChartConfig if using k3s — see above)
 - [ ] Port 80 is open on the server (Let's Encrypt HTTP challenge)
 - [ ] `k8s/overlays/production-traefik/ingress.yaml` has correct domain
 - [ ] `k8s/overlays/production-traefik/configmap-patch.yaml` has correct `BASE_URL`
@@ -329,7 +357,23 @@ make hpa
 
 ### Option C — Traefik + CloudNativePG (HA Postgres)
 
-Use this when you want high-availability Postgres with streaming replication and automatic failover. CNPG runs 3 Postgres instances (1 primary + 2 replicas) and manages failover automatically. Requires the CNPG operator installed once per cluster.
+Use this when you want managed Postgres with backups and point-in-time recovery. The default config runs **1 instance** (suitable for a single server) — you get PITR, WAL archiving, and operator-managed upgrades, but no replication or automatic failover. Requires the CNPG operator installed once per cluster.
+
+> **Scaling to 3 instances (true HA):** CNPG supports 1 primary + N replicas with automatic failover, but this only makes sense across multiple Kubernetes nodes — running 3 instances on 1 server provides no resilience. To enable HA:
+> 1. Set up a 3-node k3s cluster (see below)
+> 2. Change `instances: 1` → `instances: 3` in [`k8s/components/postgres-cnpg/postgres-cluster.yaml`](k8s/components/postgres-cnpg/postgres-cluster.yaml)
+> 3. CNPG's default pod anti-affinity (`preferredDuringSchedulingIgnoredDuringExecution`) will spread the 3 instances across nodes automatically — no extra config needed
+>
+> **3-node k3s setup:**
+> ```bash
+> # Server 1 — init the cluster
+> curl -sfL https://get.k3s.io | sh -
+> cat /var/lib/rancher/k3s/server/node-token   # copy this token
+>
+> # Servers 2 & 3 — join as agents
+> curl -sfL https://get.k3s.io | K3S_URL=https://<server1-ip>:6443 K3S_TOKEN=<token> sh -
+> ```
+> Copy `/etc/rancher/k3s/k3s.yaml` from server 1 to your local machine (replace `127.0.0.1` with server 1's public IP) and set `KUBECONFIG` to point to it. Then reinstall the CNPG operator and redeploy.
 
 **How CNPG names its services**
 
@@ -351,10 +395,12 @@ kubectl get svc -n bugsink | grep postgres
 kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
 ```
 
+**If using k3s:** same `HelmChartConfig` as Option B applies — see the k3s setup block above.
+
 **Checklist:**
 - [ ] CNPG operator installed on the cluster (see above)
 - [ ] Domain DNS A record points to your server IP
-- [ ] Traefik is deployed with a `certificatesResolvers.letsencrypt` block in its static config
+- [ ] Traefik is deployed with a `certificatesResolvers.letsencrypt` block in its static config (or HelmChartConfig if using k3s)
 - [ ] Port 80 is open on the server (Let's Encrypt HTTP challenge)
 - [ ] `k8s/overlays/production-cnpg/ingress.yaml` has correct domain
 - [ ] `k8s/overlays/production-cnpg/configmap-patch.yaml` has correct `BASE_URL`
@@ -474,7 +520,7 @@ CNPG only reads `bootstrap` when a cluster is first created, so subsequent `make
 make deploy-prod-cnpg
 make watch
 kubectl get cluster -n bugsink     # CNPG Cluster status: Healthy
-make pvc                           # 3 PVCs, one per CNPG instance
+make pvc                           # 1 PVC (or 3 PVCs if instances: 3)
 make hpa
 ```
 

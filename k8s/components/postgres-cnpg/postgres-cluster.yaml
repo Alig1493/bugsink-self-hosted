@@ -4,7 +4,7 @@ metadata:
   name: postgres
   namespace: bugsink
 spec:
-  instances: 3
+  instances: 1
   primaryUpdateStrategy: unsupervised
   storage:
     size: 10Gi
